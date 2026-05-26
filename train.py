@@ -115,7 +115,7 @@ def create_yaml_config(yolo_base_dir, yaml_path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train HuBMAP YOLO Segmentation Model")
+    parser = argparse.ArgumentParser(description="Train HuBMAP YOLO-X Segmentation Model")
     parser.add_argument("--run_name", type=str, required=True, help="Name of the training run")
     args = parser.parse_args()
 
@@ -128,42 +128,56 @@ def main():
     yolo_base_dir = "datasets/hubmap"
     yaml_path = "datasets/hubmap/data.yaml"
     
-    # 1. Convert dataset to YOLO format (Runs once)
     if not os.path.exists(yaml_path):
         prepare_yolo_dataset(raw_img_dir, jsonl_path, yolo_base_dir)
         create_yaml_config(yolo_base_dir, yaml_path)
     else:
         print("YOLO dataset format already exists. Skipping preparation.")
 
-    # 2. Initialize YOLO model
-    # 'yolo11m-seg.pt' handles the accuracy/speed tradeoff perfectly for an 8GB GPU.
-    model = YOLO("yolo11m-seg.pt")
+    # 1. Architecture Upgrade: YOLOv11 Extra Large
+    # This model has significantly more parameters and feature extraction depth.
+    model = YOLO("yolo11x-seg.pt")
 
-    # 3. Train the model
     print(f"Starting training for run: {args.run_name}")
     results = model.train(
         data=yaml_path,
-        project=os.path.abspath("outputs"), # Forces the exact directory
+        project=os.path.abspath("outputs"),
         name=args.run_name,
-        epochs=30,
-        imgsz=512,        # Native HuBMAP tile size
-        batch=8,          # Fits well within 8GB VRAM
-        device=0,         # Uses first CUDA GPU
-        workers=4,
-        optimizer="SGD",
-        lr0=0.01,
-        weight_decay=0.0001,
-        # Augmentations tuned for histology
-        hsv_h=0.015,
-        hsv_s=0.2,
-        hsv_v=0.2,
-        degrees=15.0,
-        translate=0.1,
-        scale=0.2,
+        
+        # --- COMPUTE & HARDWARE ---
+        device=[0, 1],    # Multi-GPU training
+        imgsz=512,
+        batch=64,         # Pushing batch size up to leverage the 24GB VRAM
+        workers=12,       # Increased workers for faster data loading on a robust server
+        
+        # --- TRAINING SCHEDULE ---
+        epochs=150,       # Extended run
+        patience=25,      # Early stopping if no mAP improvement over 25 epochs
+        optimizer="AdamW", 
+        lr0=0.001,        # Lower initial LR for AdamW compared to SGD
+        lrf=0.01,         # Final LR fraction
+        weight_decay=0.05,# Aggressive weight decay to prevent overfitting the X model
+        cos_lr=True,      # Cosine learning rate scheduler
+        warmup_epochs=3,
+        
+        # --- ADVANCED AUGMENTATIONS (Histology Tuned) ---
+        hsv_h=0.02,       # Slight hue shifts (stain variance)
+        hsv_s=0.3,        # Saturation variance
+        hsv_v=0.3,        # Brightness variance
+        degrees=45.0,     # Tissues have no definitive "up", full rotation is safe
+        translate=0.2,
+        scale=0.3,
         flipud=0.5,
         fliplr=0.5,
-        mosaic=0.0,       # Disabled; mosaic can distort cellular boundaries
-        mixup=0.0
+        mosaic=0.25,      # Re-introducing mild mosaic to help with edge truncation
+        mixup=0.1,        # Slight mixup for regularization
+        
+        # --- LOSS WEIGHTS ---
+        box=7.5,          # Prioritize bounding box accuracy
+        cls=0.5,
+        dfl=1.5,          # Distribution Focal Loss for finer bounding box edges
+
+        close_mosaic=0    # Disable change in behaviour
     )
     
     print("Training Complete. Results saved to:", results.save_dir)
