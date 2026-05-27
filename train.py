@@ -5,18 +5,16 @@ import shutil
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from sklearn.model_selection import train_test_split
 from ultralytics import YOLO
 from ultralytics import settings
 import yaml
+import cv2
 
 
-def prepare_yolo_dataset(raw_img_dir, jsonl_path, yolo_base_dir, img_size=512):
-    """
-    Parses HuBMAP polygons.jsonl and converts it into the YOLO segmentation format.
-    YOLO format requires normalized polygon coordinates: class x1 y1 x2 y2 ...
-    """
-    print("Preparing YOLO dataset structure...")
+def prepare_yolo_dataset(raw_img_dir, jsonl_path, meta_csv_path, yolo_base_dir, img_size=1024, dataset1_only=False):
+    print(f"Preparing YOLO dataset structure (Dataset 1 Only: {dataset1_only})...")
     
     yolo_base = Path(yolo_base_dir)
     dirs = {
@@ -49,7 +47,12 @@ def prepare_yolo_dataset(raw_img_dir, jsonl_path, yolo_base_dir, img_size=512):
     # Gather all images
     all_images = [f for f in os.listdir(raw_img_dir) if f.endswith('.tif')]
     
-    # Train/Val Split (90/10)
+    # Filter for Dataset 1 if requested
+    if dataset1_only and os.path.exists(meta_csv_path):
+        meta_df = pd.read_csv(meta_csv_path)
+        valid_ids = set(meta_df[meta_df['dataset'] == 1]['id'].astype(str))
+        all_images = [img for img in all_images if os.path.splitext(img)[0] in valid_ids]
+
     train_imgs, val_imgs = train_test_split(all_images, test_size=0.1, random_state=42)
     
     def process_split(img_list, split_name):
@@ -61,7 +64,12 @@ def prepare_yolo_dataset(raw_img_dir, jsonl_path, yolo_base_dir, img_size=512):
             src_img_path = os.path.join(raw_img_dir, img_name)
             dst_img_path = img_dir / img_name
             
-            # Copy image
+            # Read native dimensions
+            img = cv2.imread(src_img_path)
+            if img is None:
+                continue
+            native_h, native_w = img.shape[:2] 
+            
             if not dst_img_path.exists():
                 shutil.copy(src_img_path, dst_img_path)
                 
@@ -80,11 +88,13 @@ def prepare_yolo_dataset(raw_img_dir, jsonl_path, yolo_base_dir, img_size=512):
                     for poly in anno['coordinates']:
                         poly_np = np.array(poly, dtype=np.float32)
                         
-                        # Normalize coordinates to 0.0 - 1.0 based on image size
-                        poly_np[:, 0] /= img_size
-                        poly_np[:, 1] /= img_size
+                        # Normalize based on NATIVE image size, not target training size
+                        poly_np[:, 0] /= native_w
+                        poly_np[:, 1] /= native_h
                         
-                        # YOLO expects a flat list: x1 y1 x2 y2 ...
+                        # Ensure coordinates are strictly clipped between 0 and 1
+                        poly_np = np.clip(poly_np, 0.0, 1.0)
+                        
                         flat_coords = poly_np.flatten().tolist()
                         coords_str = " ".join([f"{c:.6f}" for c in flat_coords])
                         
@@ -117,6 +127,8 @@ def create_yaml_config(yolo_base_dir, yaml_path):
 def main():
     parser = argparse.ArgumentParser(description="Train HuBMAP YOLO-X Segmentation Model")
     parser.add_argument("--run_name", type=str, required=True, help="Name of the training run")
+    parser.add_argument("--stage", type=int, choices=[1, 2], default=1, help="1: All data, 2: Dataset 1 only")
+    parser.add_argument("--weights", type=str, default="yolo11x-seg.pt", help="Path to initial weights")
     args = parser.parse_args()
 
     # Force update settings to ensure TensorBoard is active
@@ -125,40 +137,40 @@ def main():
     # Paths
     raw_img_dir = "data/train"
     jsonl_path = "data/polygons.jsonl"
-    yolo_base_dir = "datasets/hubmap"
-    yaml_path = "datasets/hubmap/data.yaml"
+    meta_csv_path = "data/tile_meta.csv"
+    yolo_base_dir = f"datasets/hubmap_stage{args.stage}"
+    yaml_path = f"datasets/hubmap_stage{args.stage}/data.yaml"
+    
+    dataset1_only = (args.stage == 2)
     
     if not os.path.exists(yaml_path):
-        prepare_yolo_dataset(raw_img_dir, jsonl_path, yolo_base_dir)
+        prepare_yolo_dataset(raw_img_dir, jsonl_path, meta_csv_path, yolo_base_dir, img_size=1024, dataset1_only=dataset1_only)
         create_yaml_config(yolo_base_dir, yaml_path)
-    else:
-        print("YOLO dataset format already exists. Skipping preparation.")
 
-    # 1. Architecture Upgrade: YOLOv11 Extra Large
-    # This model has significantly more parameters and feature extraction depth.
-    model = YOLO("yolo11x-seg.pt")
+    model = YOLO(args.weights)
+    epochs = 100 if args.stage == 1 else 30
 
-    print(f"Starting training for run: {args.run_name}")
+    print(f"Starting Stage {args.stage} training for run: {args.run_name}")
     results = model.train(
         data=yaml_path,
         project=os.path.abspath("outputs"),
         name=args.run_name,
         
         # --- COMPUTE & HARDWARE ---
-        device=[0, 1],    # Multi-GPU training
-        imgsz=512,
-        batch=64,         # Pushing batch size up to leverage the 24GB VRAM
-        workers=12,       # Increased workers for faster data loading on a robust server
-        
+        device=0,
+        imgsz=1024,       # Upscaled resolution
+        batch=8,          # Adjusted for 24GB VRAM at 1024x1024
+        workers=8,
+
         # --- TRAINING SCHEDULE ---
-        epochs=150,       # Extended run
-        patience=25,      # Early stopping if no mAP improvement over 25 epochs
+        epochs=epochs,
+        patience=20,
         optimizer="AdamW", 
-        lr0=0.001,        # Lower initial LR for AdamW compared to SGD
+        lr0=0.001 if args.stage == 1 else 0.0001,  # Lower LR for fine-tuning
         lrf=0.01,         # Final LR fraction
         weight_decay=0.05,# Aggressive weight decay to prevent overfitting the X model
         cos_lr=True,      # Cosine learning rate scheduler
-        warmup_epochs=3,
+        warmup_epochs=3 if args.stage == 1 else 0,
         
         # --- ADVANCED AUGMENTATIONS (Histology Tuned) ---
         hsv_h=0.02,       # Slight hue shifts (stain variance)
@@ -176,8 +188,6 @@ def main():
         box=7.5,          # Prioritize bounding box accuracy
         cls=0.5,
         dfl=1.5,          # Distribution Focal Loss for finer bounding box edges
-
-        close_mosaic=0    # Disable change in behaviour
     )
     
     print("Training Complete. Results saved to:", results.save_dir)
