@@ -105,38 +105,26 @@ def process_tta_predictions(model, image: np.ndarray, img_size: int = 1024):
         
     return all_boxes, all_scores, all_labels, all_masks
 
-# def process_tta_predictions(model, image: np.ndarray, img_size: int = 1024):
-#     img_h, img_w = image.shape[:2]
-#     img_resized = cv2.resize(image, (img_size, img_size))
-#     img_flipped = cv2.flip(img_resized, 1) 
+def process_predictions(model, image: np.ndarray, img_size: int = 1024):
+    img_h, img_w = image.shape[:2]
+    img_resized = cv2.resize(image, (img_size, img_size))
     
-#     results_orig = model.predict(img_resized, iou=0.99, conf=0.01, retina_masks=True, verbose=False)[0]
-#     results_flip = model.predict(img_flipped, iou=0.99, conf=0.01, retina_masks=True, verbose=False)[0]
+    # Predict only on the original image
+    results_orig = model.predict(img_resized, iou=0.99, conf=0.01, retina_masks=True, verbose=False)[0]
     
-#     all_boxes, all_scores, all_labels, all_masks = [], [], [], []
+    all_boxes, all_scores, all_labels, all_masks = [], [], [], []
     
-#     if results_orig.boxes is not None and results_orig.masks is not None:
-#         all_boxes.append(results_orig.boxes.xyxyn.cpu().numpy()) 
-#         all_scores.append(results_orig.boxes.conf.cpu().numpy())
-#         all_labels.append(results_orig.boxes.cls.cpu().numpy())
-#         masks = results_orig.masks.data.cpu().numpy()
-#         masks_resized = np.array([cv2.resize(m, (img_w, img_h), interpolation=cv2.INTER_LINEAR) > 0.5 for m in masks])
-#         all_masks.append(masks_resized)
+    if results_orig.boxes is not None and results_orig.masks is not None:
+        all_boxes.append(results_orig.boxes.xyxyn.cpu().numpy()) 
+        all_scores.append(results_orig.boxes.conf.cpu().numpy())
+        all_labels.append(results_orig.boxes.cls.cpu().numpy())
+        masks = results_orig.masks.data.cpu().numpy()
+        
+        # Resize masks back to original image dimensions
+        masks_resized = np.array([cv2.resize(m, (img_w, img_h), interpolation=cv2.INTER_LINEAR) > 0.5 for m in masks])
+        all_masks.append(masks_resized)
 
-#     if results_flip.boxes is not None and results_flip.masks is not None:
-#         boxes_f = results_flip.boxes.xyxyn.cpu().numpy()
-#         boxes_f[:, [0, 2]] = 1.0 - boxes_f[:, [2, 0]]
-        
-#         all_boxes.append(boxes_f)
-#         all_scores.append(results_flip.boxes.conf.cpu().numpy())
-#         all_labels.append(results_flip.boxes.cls.cpu().numpy())
-        
-#         masks_f = results_flip.masks.data.cpu().numpy()
-#         masks_f_deaug = np.flip(masks_f, axis=2)
-#         masks_f_resized = np.array([cv2.resize(m, (img_w, img_h), interpolation=cv2.INTER_LINEAR) > 0.5 for m in masks_f_deaug])
-#         all_masks.append(masks_f_resized)
-        
-#     return all_boxes, all_scores, all_labels, all_masks
+    return all_boxes, all_scores, all_labels, all_masks
 
 def main():
     weights_path = "/kaggle/input/datasets/dragozeroone/run3-2-model/best.pt"
@@ -157,6 +145,7 @@ def main():
         img_h, img_w = image.shape[:2]
         
         boxes_list, scores_list, labels_list, masks_list = process_tta_predictions(model, image)
+        # boxes_list, scores_list, labels_list, masks_list = process_predictions(model, image)
         
         # Optimization: Pre-filter arrays before WBF to prevent OOM scaling issues
         f_boxes_list, f_scores_list, f_labels_list, f_masks_list = [], [], [], []
@@ -174,6 +163,7 @@ def main():
         fused_boxes, fused_scores, fused_labels = weighted_boxes_fusion(
             f_boxes_list, f_scores_list, f_labels_list, 
             weights=[1, 1],
+            # weights=[1], 
             iou_thr=iou_thr_wbf, 
             skip_box_thr=skip_box_thr
         )
