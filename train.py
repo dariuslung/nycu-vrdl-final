@@ -6,15 +6,14 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
 from ultralytics import YOLO
 from ultralytics import settings
 import yaml
 import cv2
 
 
-def prepare_yolo_dataset(raw_img_dir, jsonl_path, meta_csv_path, yolo_base_dir, img_size=1024, dataset1_only=False):
-    print(f"Preparing YOLO dataset structure (Dataset 1 Only: {dataset1_only})...")
+def prepare_yolo_dataset(raw_img_dir, jsonl_path, meta_csv_path, yolo_base_dir, stage):
+    print(f"Preparing YOLO dataset structure (Stage: {stage})...")
     
     yolo_base = Path(yolo_base_dir)
     dirs = {
@@ -24,17 +23,15 @@ def prepare_yolo_dataset(raw_img_dir, jsonl_path, meta_csv_path, yolo_base_dir, 
         'val_lbl': yolo_base / 'labels' / 'val'
     }
     
-    # Create directories if they don't exist
     for d in dirs.values():
         d.mkdir(parents=True, exist_ok=True)
         
+    # Glomerulus is strictly excluded. Class IDs must be continuous.
     class_mapping = {
         "blood_vessel": 0,
-        "glomerulus": 1,
-        "unsure": 2
+        "unsure": 1
     }
     
-    # Parse JSONL
     annotations_dict = {}
     if os.path.exists(jsonl_path):
         with open(jsonl_path, 'r') as f:
@@ -44,17 +41,31 @@ def prepare_yolo_dataset(raw_img_dir, jsonl_path, meta_csv_path, yolo_base_dir, 
     else:
         raise FileNotFoundError(f"Annotation file not found at {jsonl_path}")
 
-    # Gather all images
     all_images = [f for f in os.listdir(raw_img_dir) if f.endswith('.tif')]
-    
-    # Filter for Dataset 1 if requested
-    if dataset1_only and os.path.exists(meta_csv_path):
-        meta_df = pd.read_csv(meta_csv_path)
-        valid_ids = set(meta_df[meta_df['dataset'] == 1]['id'].astype(str))
-        all_images = [img for img in all_images if os.path.splitext(img)[0] in valid_ids]
+    meta_df = pd.read_csv(meta_csv_path)
 
-    train_imgs, val_imgs = train_test_split(all_images, test_size=0.1, random_state=42)
+    # --- WSI-AWARE SPATIAL SPLIT ---
+    # 1. Define the Validation Set (Strictly Dataset 1 - WSI 1 - Left Half)
+    ds1_df = meta_df[meta_df['dataset'] == 1]
+    wsi_1_id = ds1_df['source_wsi'].unique()[0]
+    wsi_1_df = ds1_df[ds1_df['source_wsi'] == wsi_1_id]
     
+    median_i = wsi_1_df['i'].median()
+    val_ids = set(wsi_1_df[wsi_1_df['i'] < median_i]['id'].astype(str))
+    
+    # 2. Define the Training Set based on Pipeline Stage
+    if stage == 1:
+        # Train on DS1 + DS2 (excluding the validation half)
+        ds12_df = meta_df[meta_df['dataset'].isin([1, 2])]
+        train_ids = set(ds12_df['id'].astype(str)) - val_ids
+    else:
+        # Train ONLY on DS1 (excluding the validation half)
+        train_ids = set(ds1_df['id'].astype(str)) - val_ids
+
+    train_imgs = [img for img in all_images if os.path.splitext(img)[0] in train_ids]
+    val_imgs = [img for img in all_images if os.path.splitext(img)[0] in val_ids]
+    # -------------------------------
+
     def process_split(img_list, split_name):
         img_dir = dirs[f'{split_name}_img']
         lbl_dir = dirs[f'{split_name}_lbl']
@@ -82,6 +93,7 @@ def prepare_yolo_dataset(raw_img_dir, jsonl_path, meta_csv_path, yolo_base_dir, 
                     class_name = anno.get('type')
                     class_id = class_mapping.get(class_name)
                     
+                    # This safely ignores any 'glomerulus' polygons
                     if class_id is None or not anno.get('coordinates'):
                         continue
                         
@@ -97,7 +109,6 @@ def prepare_yolo_dataset(raw_img_dir, jsonl_path, meta_csv_path, yolo_base_dir, 
                         
                         flat_coords = poly_np.flatten().tolist()
                         coords_str = " ".join([f"{c:.6f}" for c in flat_coords])
-                        
                         lf.write(f"{class_id} {coords_str}\n")
 
     process_split(train_imgs, 'train')
@@ -113,8 +124,7 @@ def create_yaml_config(yolo_base_dir, yaml_path):
         'val': 'images/val',
         'names': {
             0: 'blood_vessel',
-            1: 'glomerulus',
-            2: 'unsure'
+            1: 'unsure'
         }
     }
     
@@ -141,10 +151,8 @@ def main():
     yolo_base_dir = f"datasets/hubmap_stage{args.stage}"
     yaml_path = f"datasets/hubmap_stage{args.stage}/data.yaml"
     
-    dataset1_only = (args.stage == 2)
-    
     if not os.path.exists(yaml_path):
-        prepare_yolo_dataset(raw_img_dir, jsonl_path, meta_csv_path, yolo_base_dir, img_size=1024, dataset1_only=dataset1_only)
+        prepare_yolo_dataset(raw_img_dir, jsonl_path, meta_csv_path, yolo_base_dir, stage=args.stage)
         create_yaml_config(yolo_base_dir, yaml_path)
 
     model = YOLO(args.weights)
@@ -158,8 +166,8 @@ def main():
         
         # --- COMPUTE & HARDWARE ---
         device=0,
-        imgsz=1024,       # Upscaled resolution
-        batch=8,          # Adjusted for 24GB VRAM at 1024x1024
+        imgsz=1408,
+        batch=4,
         workers=8,
 
         # --- TRAINING SCHEDULE ---

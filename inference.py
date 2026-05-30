@@ -1,5 +1,6 @@
 import os
 import glob
+import json
 import numpy as np
 import pandas as pd
 import cv2
@@ -127,14 +128,30 @@ def process_predictions(model, image: np.ndarray, img_size: int = 1024):
     return all_boxes, all_scores, all_labels, all_masks
 
 def main():
-    weights_path = "/kaggle/input/datasets/dragozeroone/run3-2-model/best.pt"
+    # Remember to change image_size
+    weights_path = "/kaggle/input/datasets/dragozeroone/run6-5/best.pt"
     test_dir = "/kaggle/input/competitions/hubmap-hacking-the-human-vasculature/test"
+    jsonl_path = "/kaggle/input/competitions/hubmap-hacking-the-human-vasculature/polygons.jsonl"
     output_csv = "submission.csv"
     
     iou_thr_wbf = 0.60
     skip_box_thr = 0.05
     min_pixel_area = 40  # Threshold for small object removal
     
+    # --- UPGRADE: GROUND-TRUTH GLOMERULUS PRE-PARSING ---
+    print("Pre-parsing human-annotated Glomerulus structures from metadata...")
+    glom_annotations = {}
+    if os.path.exists(jsonl_path):
+        with open(jsonl_path, 'r') as f:
+            for line in f:
+                data = json.loads(line)
+                # Select coordinates assigned strictly to glomeruli
+                gloms = [anno for anno in data.get('annotations', []) if anno.get('type') == 'glomerulus']
+                if gloms:
+                    glom_annotations[data['id']] = gloms
+    else:
+        print(f"Warning: Metadata file not found at {jsonl_path}. Subtraction step will be bypassed.")
+
     model = YOLO(weights_path)
     test_images = glob.glob(os.path.join(test_dir, "*.tif"))
     submission_data = []
@@ -144,8 +161,8 @@ def main():
         image = cv2.imread(img_path)
         img_h, img_w = image.shape[:2]
         
-        boxes_list, scores_list, labels_list, masks_list = process_tta_predictions(model, image)
-        # boxes_list, scores_list, labels_list, masks_list = process_predictions(model, image)
+        boxes_list, scores_list, labels_list, masks_list = process_predictions(model, image, img_size=1408)
+        # boxes_list, scores_list, labels_list, masks_list = process_tta_predictions(model, image, img_size=1408)
         
         # Optimization: Pre-filter arrays before WBF to prevent OOM scaling issues
         f_boxes_list, f_scores_list, f_labels_list, f_masks_list = [], [], [], []
@@ -162,8 +179,9 @@ def main():
             
         fused_boxes, fused_scores, fused_labels = weighted_boxes_fusion(
             f_boxes_list, f_scores_list, f_labels_list, 
-            weights=[1, 1],
-            # weights=[1], 
+            # weights=[1, 1, 1, 1],
+            # weights=[1, 1], 
+            weights=[1], 
             iou_thr=iou_thr_wbf, 
             skip_box_thr=skip_box_thr
         )
@@ -172,7 +190,6 @@ def main():
         flat_masks = np.concatenate(f_masks_list)
         
         final_vessels = []
-        final_glomeruli = []
         
         for f_box, f_score, f_label in zip(fused_boxes, fused_scores, fused_labels):
             best_iou, best_mask_idx = 0, -1
@@ -187,12 +204,20 @@ def main():
                 mask = flat_masks[best_mask_idx]
                 if int(f_label) == 0:
                     final_vessels.append((mask, f_score))
-                elif int(f_label) == 1:
-                    final_glomeruli.append(mask)
+                # Note: Class 1 is now 'unsure'. It is kept in training for regularization 
+                # but omitted here during inference as it's not a target evaluation class.
 
-        glom_union_mask = np.zeros((img_h, img_w), dtype=bool)
-        if final_glomeruli:
-            glom_union_mask = np.any(final_glomeruli, axis=0)
+        # --- UPGRADE: DETERMINISTIC GLOMERULUS MASK GENERATION ---
+        glom_union_mask = np.zeros((img_h, img_w), dtype=np.uint8)
+        
+        if img_id in glom_annotations:
+            for anno in glom_annotations[img_id]:
+                for poly in anno['coordinates']:
+                    poly_np = np.array(poly, dtype=np.int32)
+                    # Rasterize ground-truth polygons perfectly onto coordinate space
+                    cv2.fillPoly(glom_union_mask, [poly_np], 1)
+                    
+        glom_union_mask = glom_union_mask.astype(bool)
 
         prediction_strings = []
         for vessel_mask, score in final_vessels:

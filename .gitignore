@@ -34,3 +34,4 @@ sanity_check*
 
 # tensorboard
 outputs/
+archive/
