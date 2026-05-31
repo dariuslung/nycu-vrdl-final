@@ -129,7 +129,7 @@ def process_predictions(model, image: np.ndarray, img_size: int = 1024):
 
 def main():
     # Remember to change image_size
-    weights_path = "/kaggle/input/datasets/dragozeroone/run6-5/best.pt"
+    weights_path = "/kaggle/input/datasets/dragozeroone/run6-2-stage2/best.pt"
     test_dir = "/kaggle/input/competitions/hubmap-hacking-the-human-vasculature/test"
     jsonl_path = "/kaggle/input/competitions/hubmap-hacking-the-human-vasculature/polygons.jsonl"
     output_csv = "submission.csv"
@@ -220,6 +220,11 @@ def main():
         glom_union_mask = glom_union_mask.astype(bool)
 
         prediction_strings = []
+        
+        # Define the morphological kernel
+        # A 3x3 elliptical kernel is biologically optimal for rounded vessels
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        
         for vessel_mask, score in final_vessels:
             cleaned_vessel_mask = vessel_mask & ~glom_union_mask
             
@@ -227,9 +232,23 @@ def main():
             if np.sum(cleaned_vessel_mask) < min_pixel_area:
                 continue
                 
-            # Application of YYama methodology: Dilation is strictly omitted to prevent Private LB degradation
+            # --- UPGRADE: MORPHOLOGICAL OPENING (3rd Place Methodology) ---
+            # 1. Convert boolean mask to uint8 for OpenCV operations
+            mask_uint8 = cleaned_vessel_mask.astype(np.uint8) * 255
             
-            rle = encode_binary_mask(cleaned_vessel_mask.astype(bool))
+            # 2. Apply cv2.MORPH_OPEN (Erosion followed by Dilation)
+            # iterations=1 is critical. More iterations will aggressively delete valid micro-capillaries.
+            opened_mask = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel, iterations=1)
+            
+            # 3. Convert back to boolean for RLE encoding
+            final_binary_mask = opened_mask > 127
+            # --------------------------------------------------------------
+            
+            # Safety check: if the opening operation entirely deleted a faint vessel, skip it
+            if not np.any(final_binary_mask):
+                continue
+            
+            rle = encode_binary_mask(final_binary_mask)
             prediction_strings.append(f"0 {score:.4f} {rle}")
                 
         submission_data.append({

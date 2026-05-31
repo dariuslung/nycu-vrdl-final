@@ -165,8 +165,8 @@ def main():
         name=args.run_name,
         
         # --- COMPUTE & HARDWARE ---
-        device=0,
-        imgsz=1408,
+        device=[0, 1],
+        imgsz=1856,
         batch=4,
         workers=8,
 
