@@ -31,7 +31,3 @@ sanity_check*
 *.pt
 *.pth
 *.ckpt
-
-# tensorboard
-outputs/
-archive/
