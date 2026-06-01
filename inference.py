@@ -130,6 +130,8 @@ def process_predictions(model, image: np.ndarray, img_size: int = 1024):
 def main():
     # Remember to change image_size
     weights_path = "/kaggle/input/datasets/dragozeroone/run6-2-stage2/best.pt"
+    weights2_path = "/kaggle/input/datasets/dragozeroone/run8-stage2/best.pt"
+
     test_dir = "/kaggle/input/competitions/hubmap-hacking-the-human-vasculature/test"
     jsonl_path = "/kaggle/input/competitions/hubmap-hacking-the-human-vasculature/polygons.jsonl"
     output_csv = "submission.csv"
@@ -153,6 +155,9 @@ def main():
         print(f"Warning: Metadata file not found at {jsonl_path}. Subtraction step will be bypassed.")
 
     model = YOLO(weights_path)
+    model2 = YOLO(weights2_path)
+    models = [model, model2]
+    
     test_images = glob.glob(os.path.join(test_dir, "*.tif"))
     submission_data = []
     
@@ -161,8 +166,16 @@ def main():
         image = cv2.imread(img_path)
         img_h, img_w = image.shape[:2]
         
-        boxes_list, scores_list, labels_list, masks_list = process_predictions(model, image, img_size=1408)
-        # boxes_list, scores_list, labels_list, masks_list = process_tta_predictions(model, image, img_size=1408)
+        boxes_list, scores_list, labels_list, masks_list = [], [], [], []
+        
+        # Run TTA for BOTH models and aggregate the raw predictions
+        for model in models:
+            b, s, l, m = process_predictions(model, image, img_size=1408)
+            # b, s, l, m = process_tta_predictions(model, image, img_size=1408)
+            boxes_list.extend(b)
+            scores_list.extend(s)
+            labels_list.extend(l)
+            masks_list.extend(m)
         
         # Optimization: Pre-filter arrays before WBF to prevent OOM scaling issues
         f_boxes_list, f_scores_list, f_labels_list, f_masks_list = [], [], [], []
@@ -179,9 +192,7 @@ def main():
             
         fused_boxes, fused_scores, fused_labels = weighted_boxes_fusion(
             f_boxes_list, f_scores_list, f_labels_list, 
-            # weights=[1, 1, 1, 1],
-            # weights=[1, 1], 
-            weights=[1], 
+            weights=[1] * len(f_boxes_list),
             iou_thr=iou_thr_wbf, 
             skip_box_thr=skip_box_thr
         )

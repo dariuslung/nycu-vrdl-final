@@ -51,7 +51,8 @@ def prepare_yolo_dataset(raw_img_dir, jsonl_path, meta_csv_path, yolo_base_dir, 
     wsi_1_df = ds1_df[ds1_df['source_wsi'] == wsi_1_id]
     
     median_i = wsi_1_df['i'].median()
-    val_ids = set(wsi_1_df[wsi_1_df['i'] < median_i]['id'].astype(str))
+    # val_ids = set(wsi_1_df[wsi_1_df['i'] < median_i]['id'].astype(str))
+    val_ids = set(wsi_1_df[wsi_1_df['i'] >= median_i]['id'].astype(str))
     
     # 2. Define the Training Set based on Pipeline Stage
     if stage == 1:
@@ -148,8 +149,8 @@ def main():
     raw_img_dir = "data/train"
     jsonl_path = "data/polygons.jsonl"
     meta_csv_path = "data/tile_meta.csv"
-    yolo_base_dir = f"datasets/hubmap_stage{args.stage}"
-    yaml_path = f"datasets/hubmap_stage{args.stage}/data.yaml"
+    yolo_base_dir = f"datasets/hubmap_stage{args.stage}_2"
+    yaml_path = f"datasets/hubmap_stage{args.stage}_2/data.yaml"
     
     if not os.path.exists(yaml_path):
         prepare_yolo_dataset(raw_img_dir, jsonl_path, meta_csv_path, yolo_base_dir, stage=args.stage)
@@ -165,9 +166,9 @@ def main():
         name=args.run_name,
         
         # --- COMPUTE & HARDWARE ---
-        device=[0, 1],
-        imgsz=1856,
-        batch=4,
+        device=1,
+        imgsz=1408,
+        batch=8,
         workers=8,
 
         # --- TRAINING SCHEDULE ---
